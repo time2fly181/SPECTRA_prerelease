@@ -19,7 +19,7 @@ channels and unusable signal are masked during scoring.
 
 ## Installation
 
-Use **Python 3.12 or newer** and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+SPECTRA requires **Python 3.12–3.14** and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 Download or clone this repository, then run the following from its root folder:
 
@@ -33,7 +33,7 @@ MPS. A GPU is optional.
 ### Model checkpoint
 
 Download `spectra_bp84.ckpt` (79 MB) from the
-[v0.1.0-pre release](https://github.com/time2fly181/SPECTRA_prerelase/releases/tag/v0.1.0-pre)
+[v0.1.0-pre release](https://github.com/time2fly181/SPECTRA_prerelease/releases/tag/v0.1.0-pre)
 and place it in `checkpoints/`, or run:
 
 ```bash

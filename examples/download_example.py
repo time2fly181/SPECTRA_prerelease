@@ -21,7 +21,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_URL = (
-    "https://github.com/time2fly181/SPECTRA_prerelase/releases/download/v0.1.0-pre"
+    "https://github.com/time2fly181/SPECTRA_prerelease/releases/download/v0.1.0-pre"
 )
 
 

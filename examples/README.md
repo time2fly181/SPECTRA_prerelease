@@ -2,7 +2,8 @@
 
 This walkthrough scores one publicly available overnight recording with the
 released SPECTRA model and summarizes the result. Commands are run from the
-repository root after [installation](../README.md#installation).
+repository root after [installation](../README.md#installation). SPECTRA requires
+**Python 3.12–3.14**.
 
 ## 1. Download the model and the example recording
 
@@ -18,7 +19,7 @@ This saves two files and checks their SHA-256 checksums:
 | Example recording SN007 (127 MB) | `data/example/SN007.edf` | `f3859131cc074d26e272e43b9a9dbf00dd6932a79a1956dd6505a9071742919c` |
 
 Both files are also available from the
-[v0.1.0-pre release](https://github.com/time2fly181/SPECTRA_prerelase/releases/tag/v0.1.0-pre)
+[v0.1.0-pre release](https://github.com/time2fly181/SPECTRA_prerelease/releases/tag/v0.1.0-pre)
 if you prefer to download them by hand. The recording can also be fetched from
 PhysioNet, its original host:
 
