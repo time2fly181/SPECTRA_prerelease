@@ -99,7 +99,7 @@ def fetch(asset: Asset, url: str | None = None) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").partition("\n")[0])
     parser.add_argument("--checkpoint-url", help="Alternative checkpoint URL")
     parser.add_argument("--edf-url", help="Alternative example-recording URL")
     parser.add_argument(

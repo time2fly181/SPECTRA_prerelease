@@ -1001,12 +1001,18 @@ def _design_display_sos(spec: DisplayFilterSpec, fs: float) -> np.ndarray | None
     order = SIGNAL_REVIEW_FILTER_ORDER
     if low is not None and low > 0 and high is not None:
         sections.append(
-            butter(order, [low / nyq, high / nyq], btype="band", output="sos")
+            np.asarray(
+                butter(order, [low / nyq, high / nyq], btype="band", output="sos")
+            )
         )
     elif low is not None and low > 0:
-        sections.append(butter(order, low / nyq, btype="high", output="sos"))
+        sections.append(
+            np.asarray(butter(order, low / nyq, btype="high", output="sos"))
+        )
     elif high is not None:
-        sections.append(butter(order, high / nyq, btype="low", output="sos"))
+        sections.append(
+            np.asarray(butter(order, high / nyq, btype="low", output="sos"))
+        )
 
     if spec.notch_hz is not None and 0.0 < spec.notch_hz < nyq:
         notch_b, notch_a = iirnotch(spec.notch_hz, SIGNAL_REVIEW_NOTCH_Q, fs)
@@ -6943,7 +6949,7 @@ class InferenceGUI(QMainWindow):
 
         if hasattr(self, "amp_mode_combo"):
             self.amp_mode_combo.setToolTip(
-                "fp32: highest accuracy, fp16/bf16: best-effort mixed precision on supported accelerators"
+                "fp32: highest accuracy, bf16: best-effort mixed precision on supported accelerators"
             )
 
         if hasattr(self, "_version_label"):
@@ -8017,7 +8023,7 @@ class InferenceGUI(QMainWindow):
         self.memory_preset_combo.setToolTip(
             "Quick presets for memory optimization:\n"
             "• Default: Standard settings (32 batch, fp32)\n"
-            "• Balanced: 50% memory reduction (16 batch, fp16)\n"
+            "• Balanced: 50% memory reduction (16 batch, bf16)\n"
             "• Memory-Constrained: 75% reduction for <8GB GPU\n"
             "• Extreme Savings: 90% reduction for large files\n"
             "• Custom: Manual configuration"
@@ -8040,11 +8046,10 @@ class InferenceGUI(QMainWindow):
         # AMP mode
         layout.addWidget(QLabel("Precision Mode:"), 2, 0)
         self.amp_mode_combo = QComboBox()
-        self.amp_mode_combo.addItems(["fp32", "fp16", "bf16"])
+        self.amp_mode_combo.addItems(["fp32", "bf16"])
         self.amp_mode_combo.setToolTip(
             "Numerical precision used for inference:\n"
             "• fp32 — full precision; slowest and most VRAM-hungry, most reproducible.\n"
-            "• fp16 — half precision; ~2× faster and ~50% less VRAM on most NVIDIA GPUs.\n"
             "• bf16 — half precision with wider dynamic range; best on RTX 30/40 and "
             "Apple Silicon. Recommended when supported."
         )
@@ -8185,26 +8190,26 @@ class InferenceGUI(QMainWindow):
 
             elif preset_name == "Balanced":
                 self.batch_size_spin.setValue(16)
-                self.amp_mode_combo.setCurrentText("fp16")
+                self.amp_mode_combo.setCurrentText("bf16")
                 self.log(
-                    "Applied Balanced preset: 16 batch, fp16 (~50% memory)",
+                    "Applied Balanced preset: 16 batch, bf16 (~50% memory)",
                     logging.INFO,
                 )
 
             elif preset_name == "Memory-Constrained (<8 GB GPU)":
                 self.batch_size_spin.setValue(8)
-                self.amp_mode_combo.setCurrentText("fp16")
+                self.amp_mode_combo.setCurrentText("bf16")
                 self.log(
-                    "Applied Memory-Constrained preset: 8 batch, fp16 (~75% memory reduction)",
+                    "Applied Memory-Constrained preset: 8 batch, bf16 (~75% memory reduction)",
                     logging.INFO,
                 )
 
             elif preset_name == "Extreme Savings (<4 GB)":
                 self.batch_size_spin.setValue(4)
-                self.amp_mode_combo.setCurrentText("fp16")
+                self.amp_mode_combo.setCurrentText("bf16")
                 self.device_combo.setCurrentText("cpu")
                 self.log(
-                    "Applied Extreme Savings preset: 4 batch, fp16, CPU (~90% memory reduction)",
+                    "Applied Extreme Savings preset: 4 batch, bf16, CPU (~90% memory reduction)",
                     logging.INFO,
                 )
 

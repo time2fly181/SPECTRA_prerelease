@@ -208,6 +208,10 @@ class InferenceModelLoadError(RuntimeError):
     pass
 
 
+# Supported precision modes and their autocast dtypes.
+_AMP_DTYPES: dict[str, torch.dtype | None] = {"fp32": None, "bf16": torch.bfloat16}
+
+
 @dataclass
 class ScoreOptions:
     """EDF scoring, batching, and Monte Carlo dropout options.
@@ -233,7 +237,7 @@ class ScoreOptions:
     auto_signal_window: bool = True  # Trim exterior epochs with no usable channel
 
     # Inference
-    amp_mode: str = "fp32"  # Mixed precision: fp16, bf16, fp32
+    amp_mode: str = "fp32"  # Precision: "fp32" or "bf16" (mixed precision)
     batch_size: int = 32
     sequential_loading: bool = True  # Materialize one context batch at a time.
     cuda_prefetch: bool = True  # CUDA-only: overlap CPU→GPU transfer with computation
@@ -282,6 +286,10 @@ class ScoreOptions:
     def __post_init__(self) -> None:
         """Validate inference and MC dropout settings."""
         _validate_mc_options(self.mc_samples, self.mc_dropout_rate)
+        if self.amp_mode not in _AMP_DTYPES:
+            raise ValueError(
+                f"amp_mode must be one of {sorted(_AMP_DTYPES)}, got {self.amp_mode!r}"
+            )
         if self.mc_aggregation not in {"consistent", "legacy"}:
             raise ValueError("mc_aggregation must be 'consistent' or 'legacy'")
 
@@ -2236,13 +2244,7 @@ def run_inference(
             np.asarray(center_valid_mask), dtype=torch.bool, device=device
         )
 
-    # Setup AMP dtype (match training approach)
-    if options.amp_mode == "fp16":
-        amp_dtype = torch.float16
-    elif options.amp_mode == "bf16":
-        amp_dtype = torch.bfloat16
-    else:
-        amp_dtype = None  # No AMP for fp32
+    amp_dtype = _AMP_DTYPES[options.amp_mode]
 
     # Move presence mask to device once
     presence_mask_device = presence_mask.to(device)
@@ -2279,8 +2281,6 @@ def run_inference(
                     ].to(device, non_blocking=True)
 
             for batch_idx in range(n_batches):
-                if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-                    torch.compiler.cudagraph_mark_step_begin()
                 start_idx = batch_idx * options.batch_size
                 end_idx = min(start_idx + options.batch_size, n_epochs)
 
@@ -2430,13 +2430,7 @@ def run_inference_sequential(
             np.asarray(center_valid_mask), dtype=torch.bool, device=device
         )
 
-    # Setup AMP dtype
-    if options.amp_mode == "fp16":
-        amp_dtype = torch.float16
-    elif options.amp_mode == "bf16":
-        amp_dtype = torch.bfloat16
-    else:
-        amp_dtype = None
+    amp_dtype = _AMP_DTYPES[options.amp_mode]
 
     if diagnostics_out is not None:
         diagnostics_out.clear()
@@ -2462,8 +2456,6 @@ def run_inference_sequential(
             batch_idx = 0
 
             for batch_tensor, batch_presence, batch_start, batch_end in batch_generator:
-                if hasattr(torch.compiler, "cudagraph_mark_step_begin"):
-                    torch.compiler.cudagraph_mark_step_begin()
                 batch = batch_tensor.to(device)
                 batch_presence_mask = batch_presence.to(device)
 
@@ -2614,10 +2606,14 @@ def _pin_recording_band_statistics(
             if not bool(keep.any()):
                 continue
             with torch.autocast(device_type=device.type, enabled=False):
-                env = encoder.modality_envelope(modality, chunk[keep][:, idx]).double()
+                env = encoder.modality_envelope(modality, chunk[keep][:, idx])
+            # Reduce in float64 on CPU: MPS has no float64, and the downstream
+            # reducers already work in CPU float64, so every device agrees.
+            # Move first, then cast: a combined .to(cpu, float64) casts on MPS.
+            env = env.cpu().double()
             per_epoch_mean, per_epoch_var = norm.per_sample_statistics(env)
-            summaries[modality][0].append(per_epoch_mean.cpu())
-            summaries[modality][1].append(per_epoch_var.cpu())
+            summaries[modality][0].append(per_epoch_mean)
+            summaries[modality][1].append(per_epoch_var)
     computed: list[tuple[PerRecordingBandNorm, torch.Tensor, torch.Tensor]] = []
     for modality, norm in modules.items():
         means, variances = summaries[modality]

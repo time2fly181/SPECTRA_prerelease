@@ -58,7 +58,7 @@ def summarize(output_dir: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").partition("\n")[0])
     parser.add_argument("output_dir", type=Path, help="Folder written by spectra")
     args = parser.parse_args()
     try:

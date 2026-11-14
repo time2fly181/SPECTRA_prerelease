@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> None:
         default=-1,
         help="Exclusive end, or -1 for recording end",
     )
-    parser.add_argument("--amp", choices=["fp32", "bf16", "fp16"], default="fp32")
+    parser.add_argument("--amp", choices=["fp32", "bf16"], default="fp32")
     parser.add_argument(
         "--mc-samples",
         type=int,

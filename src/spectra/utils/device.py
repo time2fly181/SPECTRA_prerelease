@@ -30,7 +30,7 @@ def _autocast_or_fallback(
     autocast_dtype: torch.dtype,
     warning_message: str,
 ) -> Generator[None, None, None]:
-    if autocast_dtype not in (torch.float16, torch.bfloat16):
+    if autocast_dtype != torch.bfloat16:
         warnings.warn(warning_message, RuntimeWarning, stacklevel=3)
         yield
         return
@@ -90,7 +90,8 @@ def autocast_context(
     - autocast_context(device: str, use_amp: bool, amp_dtype: torch.dtype)
     - autocast_context(..., dtype=..., use_amp=...) (keyword-friendly)
 
-    When AMP is enabled, supports both fp16 (torch.float16) and bf16 (torch.bfloat16).
+    When AMP is enabled, only bf16 (torch.bfloat16) is supported; fp16 is
+    rejected because it overflows to NaN in this model (observed on MPS).
     Unsupported autocast setup emits a warning and continues without autocast.
     Exceptions raised by the wrapped model body are propagated.
     """
@@ -110,7 +111,7 @@ def autocast_context(
                 device_str,
                 amp_dtype,
                 f"autocast_context: unsupported amp_dtype={amp_dtype}, "
-                "expected torch.float16 or torch.bfloat16. Disabling autocast.",
+                "expected torch.bfloat16. Disabling autocast.",
             ):
                 yield
             return
@@ -133,7 +134,7 @@ def autocast_context(
             device.type,
             chosen_dtype,
             f"autocast_context: unsupported dtype={chosen_dtype}, "
-            "expected torch.float16 or torch.bfloat16. Disabling autocast.",
+            "expected torch.bfloat16. Disabling autocast.",
         ):
             yield
         return

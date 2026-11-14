@@ -25,3 +25,4 @@ outputs/
 *.csv
 *.log
 /LOCAL_DEVELOPMENT.md
+pyrightconfig.json
