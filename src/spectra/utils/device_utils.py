@@ -32,6 +32,17 @@ def is_mps_available() -> bool:
     return False
 
 
+def cpu_only_torch_hint() -> str | None:
+    """Explain a CPU-only PyTorch build, or return None when CUDA is compiled in."""
+
+    if torch.version.cuda is not None or is_mps_available():
+        return None
+    return (
+        f"Installed PyTorch is a CPU-only build ({torch.__version__}); "
+        "reinstall with `uv sync --locked` to get the CUDA build."
+    )
+
+
 def _normalize_device_name(device: torch.device | str | None) -> str:
     if isinstance(device, torch.device):
         return device.type
@@ -74,6 +85,9 @@ def resolve_device(preference: str = "auto") -> ResolvedDevice:
         else:
             resolved = "cpu"
             warning = "CUDA was requested but is not available; falling back to CPU."
+            hint = cpu_only_torch_hint()
+            if hint is not None:
+                warning = f"{warning} {hint}"
     elif pref == "mps":
         if is_mps_available():
             resolved = "mps"

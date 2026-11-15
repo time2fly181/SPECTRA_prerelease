@@ -12,6 +12,7 @@ import json
 import logging
 import multiprocessing
 import os
+import platform
 import sys
 import tempfile
 import time
@@ -26,12 +27,28 @@ from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos
 if TYPE_CHECKING:
     from spectra.inference import ScoreOptions
 
-# Set environment variables BEFORE importing Qt to prevent graphics conflicts
-os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = ""  # Let Qt auto-detect
-os.environ["QT_OPENGL"] = "software"  # Use software OpenGL to avoid GPU conflicts
-os.environ["CUDA_VISIBLE_DEVICES"] = os.environ.get(
-    "CUDA_VISIBLE_DEVICES", "0"
-)  # Ensure CUDA device is set
+
+def _running_under_wsl() -> bool:
+    """Return True when running inside Windows Subsystem for Linux."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if "microsoft" in platform.uname().release.lower():
+        return True
+    return os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop")
+
+
+RUNNING_UNDER_WSL = _running_under_wsl()
+
+# Set environment variables BEFORE importing Qt to prevent graphics conflicts.
+# setdefault keeps any value the user exported explicitly.
+os.environ.setdefault("QT_OPENGL", "software")  # Windows: software OpenGL
+if sys.platform.startswith("linux"):
+    # On Linux (and especially WSLg, where Mesa's d3d12 driver shares the GPU
+    # with CUDA through dxgkrnl) keep Qt rendering off the GPU so the display
+    # stack never competes with inference kernels.
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    os.environ.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")  # Ensure CUDA device is set
 
 from spectra.inference_gui.state import (  # noqa: E402
     InferenceRunState,
@@ -6883,8 +6900,6 @@ class InferenceGUI(QMainWindow):
         self.run_state = InferenceRunState()
         self.review_state = ReviewSessionState()
         self.project_state = ProjectState()
-        self._advanced_mode: bool = True
-        self._easy_mode: bool = True  # Start in easy mode by default
 
         self._override_undo_stack: QUndoStack = QUndoStack(self)
         self._override_undo_stack.setUndoLimit(500)
@@ -6918,9 +6933,11 @@ class InferenceGUI(QMainWindow):
             "recent_projects": [],
         }
 
+        self._batch_size_from_settings = False
         self.initUI()
         self.apply_stylesheet()
         self.load_settings()
+        self._apply_wsl_safe_defaults()
         self._update_setup_readiness()
         self._refresh_device_controls()
         self._update_status_bar()
@@ -7063,75 +7080,33 @@ class InferenceGUI(QMainWindow):
 
         params_layout = self.setup_page.content_layout
 
-        # Mode toggle section with Easy Mode / Advanced Mode
-        mode_layout = QHBoxLayout()
+        # Setup toolbar: shortcuts hint and channel preview
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.addStretch()
 
-        # Easy Mode checkbox (checked by default)
-        self.easy_mode_toggle = QCheckBox("Essential options only")
-        self.easy_mode_toggle.setToolTip(
-            "Simplified interface: shows only essential options (EDF, Model, Channels)\n"
-            "Uncheck to see all configuration options"
-        )
-        self.easy_mode_toggle.setChecked(True)
-        self.easy_mode_toggle.stateChanged.connect(self.toggle_easy_mode)
-        self.easy_mode_toggle.setStyleSheet(
-            "QCheckBox { color: #4CAF50; font-weight: bold; }"
-        )
-        mode_layout.addWidget(self.easy_mode_toggle)
-
-        mode_layout.addSpacing(20)
-
-        # Advanced Mode checkbox
-        self.mode_toggle = QCheckBox("Show expert options")
-        self.mode_toggle.setToolTip("Show advanced options (MC Dropout, Calibration)")
-        self.mode_toggle.setChecked(True)
-        self.mode_toggle.stateChanged.connect(self.toggle_advanced_mode)
-        self.mode_toggle.setEnabled(False)  # Disabled until Easy Mode is unchecked
-        self.mode_toggle.setVisible(False)
-        mode_layout.addWidget(self.mode_toggle)
-        mode_layout.addStretch()
-
-        # Keyboard shortcuts hint
         shortcuts_hint = QLabel(
             "<small style='color: #666;'>Press F1 for shortcuts</small>"
         )
-        mode_layout.addWidget(shortcuts_hint)
+        toolbar_layout.addWidget(shortcuts_hint)
 
-        mode_layout.addSpacing(10)
+        toolbar_layout.addSpacing(10)
 
-        # Preview channels button
         self.preview_channels_btn = QPushButton("Preview EDF Channels")
         self.preview_channels_btn.setToolTip(
             "Check available channels in the EDF file before scoring"
         )
         self.preview_channels_btn.clicked.connect(self.preview_edf_channels)
-        mode_layout.addWidget(self.preview_channels_btn)
+        toolbar_layout.addWidget(self.preview_channels_btn)
 
-        params_layout.addLayout(mode_layout)
+        params_layout.addLayout(toolbar_layout)
 
-        # Add parameter sections
-        # Essential section (always visible)
+        # Parameter sections (all always visible)
         self.files_group = self.create_files_section()
-        params_layout.addWidget(self.files_group)
-
-        # Standard sections (hidden in Easy Mode)
         self.signal_processing_group = self.create_signal_processing_section()
         self.inference_group = self.create_inference_section()
+        params_layout.addWidget(self.files_group)
         params_layout.addWidget(self.signal_processing_group)
         params_layout.addWidget(self.inference_group)
-
-        # Advanced sections (hidden in Simple mode, require Advanced checkbox)
-        self.calibration_group = self.create_calibration_section()
-        self.advanced_group = self.create_advanced_section()
-
-        params_layout.addWidget(self.calibration_group)
-        params_layout.addWidget(self.advanced_group)
-
-        # Initially hide non-essential sections (Easy Mode is ON by default)
-        self.signal_processing_group.setVisible(False)
-        self.inference_group.setVisible(False)
-        self.calibration_group.setVisible(False)
-        self.advanced_group.setVisible(False)
 
         params_layout.addStretch()
 
@@ -7531,19 +7506,12 @@ class InferenceGUI(QMainWindow):
         sep2.setStyleSheet("color: #444;")
         status_bar.addPermanentWidget(sep2)
 
-        # Accelerator/backend summary
+        # Accelerator/backend summary. The CUDA label is computed once and
+        # cached so the GUI thread does not query the driver repeatedly.
+        self._cuda_label_text: str | None = None
         try:
-            import torch
-
             resolved = self._resolve_selected_device()
-            if resolved.resolved == "cuda" and torch.cuda.is_available():
-                cuda_ver = torch.version.cuda
-                device_name = torch.cuda.get_device_name(0)
-                self._version_label = QLabel(f"CUDA {cuda_ver} • {device_name[:30]}")
-            elif resolved.resolved == "mps":
-                self._version_label = QLabel("MPS • Apple Silicon GPU")
-            else:
-                self._version_label = QLabel("CPU Mode")
+            self._version_label = QLabel(self._accelerator_label_text(resolved))
         except Exception:
             self._version_label = QLabel("PyTorch not loaded")
         self._version_label.setStyleSheet("color: #666; padding: 0 10px;")
@@ -7559,25 +7527,44 @@ class InferenceGUI(QMainWindow):
         self._last_progress_value = 0
         self._epochs_processed = 0
 
+    def _accelerator_label_text(self, resolved: Any) -> str:
+        """Return the status-bar backend label, caching the CUDA device name."""
+        if resolved.resolved == "cuda":
+            if self._cuda_label_text is None:
+                import torch
+
+                device_name = torch.cuda.get_device_name(0)
+                self._cuda_label_text = (
+                    f"CUDA {torch.version.cuda} • {device_name[:30]}"
+                )
+            return self._cuda_label_text
+        if resolved.resolved == "mps":
+            return "MPS • Apple Silicon GPU"
+        return "CPU Mode"
+
+    def _inference_running(self) -> bool:
+        worker = getattr(self, "worker", None)
+        return worker is not None and worker.isRunning()
+
     def _update_status_bar(self):
         """Update status bar with current GPU memory and stats."""
+        # Never touch the accelerator from the GUI thread while the inference
+        # worker owns it; concurrent driver calls from two threads are a
+        # suspected trigger of display-driver watchdog crashes under WSL.
+        if self._inference_running():
+            return
         try:
-            import torch
+            from spectra.utils.device_utils import cpu_only_torch_hint
 
             resolved = self._resolve_selected_device()
             stats = _get_gui_device_memory_stats(resolved.torch_device)
-            self._version_label.setToolTip(
-                f"Requested: {resolved.requested} | Using: {resolved.description}"
-            )
-
-            if resolved.resolved == "cuda" and torch.cuda.is_available():
-                cuda_ver = torch.version.cuda
-                device_name = torch.cuda.get_device_name(0)
-                self._version_label.setText(f"CUDA {cuda_ver} • {device_name[:30]}")
-            elif resolved.resolved == "mps":
-                self._version_label.setText("MPS • Apple Silicon GPU")
-            else:
-                self._version_label.setText("CPU Mode")
+            tooltip = f"Requested: {resolved.requested} | Using: {resolved.description}"
+            if resolved.resolved == "cpu":
+                hint = cpu_only_torch_hint()
+                if hint is not None:
+                    tooltip = f"{tooltip}\n{hint}"
+            self._version_label.setToolTip(tooltip)
+            self._version_label.setText(self._accelerator_label_text(resolved))
 
             if stats is not None and stats.get("device") in {"cuda", "mps"}:
                 allocated_bytes = stats.get("allocated_bytes")
@@ -7801,7 +7788,7 @@ class InferenceGUI(QMainWindow):
         self.output_dir_status_label.setVisible(False)
         layout.addWidget(self.output_dir_status_label, 5, 1, 1, 2)
 
-        # Device selection (hidden in easy mode)
+        # Device selection
         self.device_label = QLabel("Device:")
         layout.addWidget(self.device_label, 6, 0)
         self.device_combo = QComboBox()
@@ -8059,97 +8046,6 @@ class InferenceGUI(QMainWindow):
         layout.setColumnStretch(2, 1)
         return group
 
-    def create_calibration_section(self) -> QGroupBox:
-        """Create preprocessing calibration section."""
-        group = QGroupBox("Preprocessing Calibration")
-        layout = QGridLayout()
-        group.setLayout(layout)
-
-        info_label = QLabel(
-            "Signals are median/IQR-normalized per recording (per channel, clipped to ±20) "
-            "before inference — matching batch_edf_to_zarr_fp32.py. "
-            "All bandpass/notch filtering must be handled offline."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #555555; font-size: 11px;")
-        layout.addWidget(info_label, 0, 0, 1, 2)
-
-        layout.setColumnStretch(1, 1)
-        return group
-
-    def create_advanced_section(self) -> QGroupBox:
-        """Create advanced options section."""
-        group = QGroupBox("Advanced Options")
-        layout = QGridLayout()
-        group.setLayout(layout)
-
-        # Monte Carlo dropout
-        self.mc_dropout_check = QCheckBox("Enable MC Dropout")
-        self.mc_dropout_check.setToolTip(
-            "Run the model multiple times with dropout active to estimate prediction "
-            "uncertainty. Slows inference by ~Nx where N is the sample count. Useful "
-            "for flagging epochs the model is unsure about — most users can leave off."
-        )
-        self.mc_dropout_check.stateChanged.connect(self._sync_advanced_option_widgets)
-        layout.addWidget(self.mc_dropout_check, 0, 0, 1, 2)
-
-        layout.addWidget(QLabel("MC Samples:"), 1, 0)
-        self.mc_samples_spin = QSpinBox()
-        self.mc_samples_spin.setRange(2, 50)
-        self.mc_samples_spin.setValue(10)
-        self.mc_samples_spin.setToolTip(
-            "Number of stochastic forward passes used to estimate uncertainty. "
-            "More samples = smoother estimate, but linearly longer runtime. Typical: 10."
-        )
-        layout.addWidget(self.mc_samples_spin, 1, 1)
-
-        layout.addWidget(QLabel("MC Dropout Rate:"), 2, 0)
-        self.mc_dropout_rate_spin = QDoubleSpinBox()
-        self.mc_dropout_rate_spin.setRange(0.0, 0.5)
-        self.mc_dropout_rate_spin.setSingleStep(0.05)
-        self.mc_dropout_rate_spin.setValue(0.2)
-        self.mc_dropout_rate_spin.setDecimals(2)
-        self.mc_dropout_rate_spin.setToolTip(
-            "Probability of dropping each unit during MC sampling. Typical: 0.1–0.3. "
-            "Set to 0.0 to use the dropout rate the model was trained with."
-        )
-        layout.addWidget(self.mc_dropout_rate_spin, 2, 1)
-
-        layout.addWidget(QLabel("MC Pooling:"), 3, 0)
-        self.mc_pooling_combo = QComboBox()
-        self.mc_pooling_combo.addItems(["prob", "logit"])
-        self.mc_pooling_combo.setToolTip(
-            "How the MC samples are combined.\n"
-            "prob (default): average the softmax posteriors — the MC-dropout\n"
-            "  predictive distribution, and the pooling that actually smooths.\n"
-            "logit: average raw logits — the geometric mean of posteriors, which\n"
-            "  largely reproduces the deterministic pass. Use only to reproduce\n"
-            "  runs scored before this option existed."
-        )
-        layout.addWidget(self.mc_pooling_combo, 3, 1)
-
-        self.mc_attention_check = QCheckBox("Sample attention dropout")
-        self.mc_attention_check.setChecked(True)
-        self.mc_attention_check.setToolTip(
-            "Also sample nn.MultiheadAttention dropout. MHA applies dropout off\n"
-            "its own training flag rather than through a child nn.Dropout, so\n"
-            "leaving this off keeps a large share of the model's trained\n"
-            "stochasticity out of the MC ensemble."
-        )
-        layout.addWidget(self.mc_attention_check, 4, 0, 1, 2)
-
-        layout.setColumnStretch(2, 1)
-        self._sync_advanced_option_widgets()
-        return group
-
-    def _sync_advanced_option_widgets(self):
-        """Enable advanced widgets only when their parent option is active."""
-        mc_enabled = self.mc_dropout_check.isChecked()
-        self.mc_samples_spin.setEnabled(mc_enabled)
-        self.mc_dropout_rate_spin.setEnabled(mc_enabled)
-        self.mc_pooling_combo.setEnabled(mc_enabled)
-        self.mc_attention_check.setEnabled(mc_enabled)
-
     def setup_logging(self):
         """Setup logging to display in GUI."""
         # Use a dedicated logger so we don't attach GUI handlers to the root logger.
@@ -8170,6 +8066,33 @@ class InferenceGUI(QMainWindow):
 
         self._logger = logger
         self._qt_log_handler = handler
+
+    def _apply_wsl_safe_defaults(self) -> None:
+        """Use the CLI's batch size under WSL, where the GPU also drives WSLg.
+
+        Large GUI batches under WSL have coincided with display-driver
+        watchdog crashes; batch 8 matches the CLI default known to run there.
+        A batch size saved by the user is kept, with a warning.
+        """
+        if not RUNNING_UNDER_WSL:
+            return
+        wsl_batch_size = 8
+        current = self.batch_size_spin.value()
+        if not self._batch_size_from_settings:
+            if current > wsl_batch_size:
+                self.batch_size_spin.setValue(wsl_batch_size)
+                self.log(
+                    f"WSL detected: default batch size lowered to {wsl_batch_size} "
+                    "(matches the CLI) to reduce GPU watchdog risk.",
+                    logging.INFO,
+                )
+        elif current > wsl_batch_size:
+            self.log(
+                f"WSL detected: saved batch size {current} is above "
+                f"{wsl_batch_size}. If the system becomes unstable during "
+                f"inference, use batch size {wsl_batch_size} or less.",
+                logging.WARNING,
+            )
 
     def apply_memory_preset(self, preset_name: str):
         """Apply memory optimization preset.
@@ -8829,10 +8752,6 @@ class InferenceGUI(QMainWindow):
         """Get ScoreOptions from GUI inputs."""
         from spectra.inference import ScoreOptions
 
-        mc_dropout_rate = self.mc_dropout_rate_spin.value()
-        if mc_dropout_rate == 0.0:
-            mc_dropout_rate = None
-
         # End epoch of 0 means "no window set" (e.g. no EDF loaded yet) -> score to end.
         end_epoch = self.end_epoch_spin.value()
         if end_epoch <= 0:
@@ -8848,14 +8767,8 @@ class InferenceGUI(QMainWindow):
             # Inference
             amp_mode=self.amp_mode_combo.currentText(),
             batch_size=self.batch_size_spin.value(),
-            # Calibration
-            calibration_mode="per_recording",
-            # MC Dropout
-            use_mc_dropout=self.mc_dropout_check.isChecked(),
-            mc_samples=self.mc_samples_spin.value(),
-            mc_dropout_rate=mc_dropout_rate,
-            mc_pooling=self.mc_pooling_combo.currentText(),
-            mc_include_attention=self.mc_attention_check.isChecked(),
+            # Per-recording normalization is fixed; MC dropout is not used here.
+            use_mc_dropout=False,
         )
 
     def start_inference(self):
@@ -10151,46 +10064,6 @@ class InferenceGUI(QMainWindow):
                 suggestion="Choose a writable location and try again.",
             )
 
-    def toggle_advanced_mode(self, state: int):
-        """Toggle visibility of advanced sections."""
-        self._advanced_mode = state == Qt.CheckState.Checked.value
-
-        # Show advanced sections only if both Easy Mode is OFF and Advanced Mode is ON
-        show_advanced = self._advanced_mode and not self._easy_mode
-        self.calibration_group.setVisible(show_advanced)
-        self.advanced_group.setVisible(show_advanced)
-
-    def toggle_easy_mode(self, state: int):
-        """Toggle Easy Mode - shows/hides most configuration options."""
-        self._easy_mode = state == Qt.CheckState.Checked.value
-
-        # In Easy Mode, hide everything except files section
-        self.signal_processing_group.setVisible(not self._easy_mode)
-        self.inference_group.setVisible(not self._easy_mode)
-
-        # Device selection within files section (keep visible only in non-easy mode)
-        if hasattr(self, "device_label"):
-            self.device_label.setVisible(not self._easy_mode)
-            self.device_combo.setVisible(not self._easy_mode)
-
-        # Update advanced sections visibility
-        show_advanced = self._advanced_mode and not self._easy_mode
-        self.calibration_group.setVisible(show_advanced)
-        self.advanced_group.setVisible(show_advanced)
-
-        # Disable Advanced Mode checkbox in Easy Mode
-        self.mode_toggle.setEnabled(not self._easy_mode)
-        self.mode_toggle.setVisible(not self._easy_mode)
-        if not self._easy_mode and not self.mode_toggle.isChecked():
-            self.mode_toggle.setChecked(True)
-
-        if self._easy_mode:
-            self.log("Easy Mode enabled - showing essential options only", logging.INFO)
-        else:
-            self.log(
-                "Easy Mode disabled - showing all configuration options", logging.INFO
-            )
-
     # =========================================================================
     # Progress Phase Indicators
     # =========================================================================
@@ -10446,12 +10319,6 @@ class InferenceGUI(QMainWindow):
                 idx = self.device_combo.findText(settings["device"])
                 if idx >= 0:
                     self.device_combo.setCurrentIndex(idx)
-            if "easy_mode" in settings and isinstance(settings["easy_mode"], bool):
-                self.easy_mode_toggle.setChecked(settings["easy_mode"])
-            if "advanced_mode" in settings and isinstance(
-                settings["advanced_mode"], bool
-            ):
-                self.mode_toggle.setChecked(settings["advanced_mode"])
 
             # Load recent files (filter out non-existent files)
             if "recent_edf_files" in settings and isinstance(
@@ -10494,41 +10361,12 @@ class InferenceGUI(QMainWindow):
                     <= self.batch_size_spin.maximum()
                 ):
                     self.batch_size_spin.setValue(int(val))
+                    self._batch_size_from_settings = True
             if "amp_mode" in settings:
                 idx = self.amp_mode_combo.findText(settings["amp_mode"])
                 if idx >= 0:
                     self.amp_mode_combo.setCurrentIndex(idx)
 
-            # Load advanced settings with validation
-            if "use_mc_dropout" in settings:
-                if isinstance(settings["use_mc_dropout"], bool):
-                    self.mc_dropout_check.setChecked(settings["use_mc_dropout"])
-            if "mc_samples" in settings:
-                val = settings["mc_samples"]
-                if (
-                    isinstance(val, (int, float))
-                    and self.mc_samples_spin.minimum()
-                    <= val
-                    <= self.mc_samples_spin.maximum()
-                ):
-                    self.mc_samples_spin.setValue(int(val))
-            if "mc_dropout_rate" in settings:
-                val = settings["mc_dropout_rate"]
-                if (
-                    isinstance(val, (int, float))
-                    and self.mc_dropout_rate_spin.minimum()
-                    <= val
-                    <= self.mc_dropout_rate_spin.maximum()
-                ):
-                    self.mc_dropout_rate_spin.setValue(float(val))
-            if "mc_pooling" in settings:
-                idx = self.mc_pooling_combo.findText(str(settings["mc_pooling"]))
-                if idx >= 0:
-                    self.mc_pooling_combo.setCurrentIndex(idx)
-            if "mc_include_attention" in settings:
-                self.mc_attention_check.setChecked(
-                    bool(settings["mc_include_attention"])
-                )
             if "confidence_threshold" in settings:
                 val = settings["confidence_threshold"]
                 min_threshold = int(MIN_CONFIDENCE_THRESHOLD * 100)
@@ -10569,7 +10407,6 @@ class InferenceGUI(QMainWindow):
                 and Path(self.checkpoint_edit.text().strip()).exists()
             ):
                 self._load_checkpoint_info(self.checkpoint_edit.text().strip())
-            self._sync_advanced_option_widgets()
             # Re-apply theme stylesheet in case the user previously chose light mode.
             self.apply_stylesheet()
             self.log("Settings loaded successfully", logging.INFO)
@@ -10591,8 +10428,6 @@ class InferenceGUI(QMainWindow):
                 "output_dir": self.output_dir_edit.text(),
                 "channel_slot_overrides": self._channel_slot_overrides,
                 "device": self.device_combo.currentText(),
-                "easy_mode": self.easy_mode_toggle.isChecked(),
-                "advanced_mode": self.mode_toggle.isChecked(),
                 # Recent files
                 "recent_edf_files": self._recent_edf_files[: self.MAX_RECENT_FILES],
                 "recent_checkpoint_files": self._recent_checkpoint_files[
@@ -10604,12 +10439,6 @@ class InferenceGUI(QMainWindow):
                 # Inference
                 "batch_size": self.batch_size_spin.value(),
                 "amp_mode": self.amp_mode_combo.currentText(),
-                # Advanced
-                "use_mc_dropout": self.mc_dropout_check.isChecked(),
-                "mc_samples": self.mc_samples_spin.value(),
-                "mc_dropout_rate": self.mc_dropout_rate_spin.value(),
-                "mc_pooling": self.mc_pooling_combo.currentText(),
-                "mc_include_attention": self.mc_attention_check.isChecked(),
                 "confidence_threshold": self.conf_threshold_slider.value(),
                 # View settings
                 "font_size": self.settings.get("font_size", 12),

@@ -13,7 +13,7 @@ from .common import add_page_header, make_empty_state
 
 
 class SetupTab(QWidget):
-    """Scrollable setup page with progressive-disclosure content."""
+    """Scrollable setup page holding every scoring option."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -26,8 +26,8 @@ class SetupTab(QWidget):
             step="Step 1",
             title="Set up the recording",
             description=(
-                "Choose an EDF recording and compatible checkpoint. Essential options "
-                "stay visible; processing and uncertainty controls expand only when needed."
+                "Choose an EDF recording and compatible checkpoint, then review the "
+                "analysis window, device, and inference settings below."
             ),
         )
 

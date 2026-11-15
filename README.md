@@ -28,7 +28,13 @@ uv sync --locked
 ```
 
 SPECTRA supports CPU inference, NVIDIA GPUs through CUDA, and Apple GPUs through
-MPS. A GPU is optional.
+MPS. A GPU is optional. On Windows, `uv sync` installs the CUDA 12.8 build of
+PyTorch from the PyTorch index; on Linux the default build already includes CUDA.
+Check with `uv run python -c "import torch; print(torch.cuda.is_available())"`.
+
+Keep the virtual environment out of OneDrive or other synced folders: sync
+placeholders can block package upgrades. Set `UV_PROJECT_ENVIRONMENT` to a path
+outside the synced folder if the repository lives inside one.
 
 ### Model checkpoint
 
