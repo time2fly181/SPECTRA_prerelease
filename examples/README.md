@@ -68,7 +68,7 @@ mean confidence. The output folder contains:
 
 | File | Contents |
 | --- | --- |
-| `SN007_predictions.csv` | One row per 30-second epoch: `Epoch` (from 0) and `Stage` (`W`, `N1`, `N2`, `N3`, `REM`, or `Unscored`) |
+| `SN007_predictions.csv` | One row per 30-second epoch: `Epoch` (from 1) and `Stage` (`W`, `N1`, `N2`, `N3`, `REM`, or `Unscored`) |
 | `SN007_probabilities.npy` | Array of shape `[epochs, 5]` with stage probabilities in the order W, N1, N2, N3, REM |
 | `SN007_flags.npz` | Per-epoch uncertainty scores (`flag_maxprob`, `flag_margin`, `flag_entropy`) |
 | `SN007_epoch_signal_valid.npy` | Per-epoch flag for whether usable signal was present |

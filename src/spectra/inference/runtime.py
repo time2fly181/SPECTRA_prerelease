@@ -2792,7 +2792,7 @@ def save_results(
 
     Returns:
         Dict of CSV, NPY, and optional NPZ paths. Files with matching names are
-        overwritten. CSV indices start at zero and negative labels are Unscored.
+        overwritten. CSV epoch numbers start at 1 and negative labels are Unscored.
     """
     # Ensure output_dir is valid (handle empty strings)
     if not output_dir or str(output_dir).strip() == "":
@@ -2803,7 +2803,7 @@ def save_results(
     predictions_csv = resolved_output_dir / f"{edf_basename}_predictions.csv"
     with open(predictions_csv, "w") as f:
         f.write("Epoch,Stage\n")
-        for i, pred in enumerate(predictions):
+        for i, pred in enumerate(predictions, start=1):
             pred_int = int(pred)
             stage = "Unscored" if pred_int < 0 else stage_names[pred_int]
             f.write(f"{i},{stage}\n")
