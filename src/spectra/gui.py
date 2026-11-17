@@ -7762,7 +7762,7 @@ class InferenceGUI(QMainWindow):
         # Output directory
         layout.addWidget(QLabel("Output Directory:"), 4, 0)
         self.output_dir_edit = QLineEdit()
-        self.output_dir_edit.setText("./output")
+        self.output_dir_edit.setText("./outputs")
         self.output_dir_edit.editingFinished.connect(self._validate_output_dir_path)
         layout.addWidget(self.output_dir_edit, 4, 1)
 
@@ -7891,11 +7891,8 @@ class InferenceGUI(QMainWindow):
 
     def open_output_directory(self):
         """Open the output directory in the system file manager."""
-        output_dir = self.output_dir_edit.text()
-        if not output_dir:
-            output_dir = "./output"
-
-        output_path = Path(output_dir)
+        output_text = self.output_dir_edit.text().strip()
+        output_path = Path(output_text or "./outputs").expanduser()
         if not output_path.exists():
             try:
                 output_path.mkdir(parents=True, exist_ok=True)
@@ -8324,13 +8321,17 @@ class InferenceGUI(QMainWindow):
             return
         self._load_checkpoint_info(path)
 
+    def _output_dir_path(self) -> Path:
+        """Return the configured output directory with ``~`` expanded."""
+        text = self.output_dir_edit.text().strip()
+        return Path(text).expanduser() if text else Path(".")
+
     def _validate_output_dir_path(self) -> None:
         """Check that the configured output directory can receive files."""
-        path = self.output_dir_edit.text().strip()
-        if not path:
+        if not self.output_dir_edit.text().strip():
             self.output_dir_status_label.setVisible(False)
             return
-        target = Path(path).expanduser()
+        target = self._output_dir_path()
         if target.exists():
             if not target.is_dir():
                 self._set_output_dir_status(
@@ -8669,7 +8670,7 @@ class InferenceGUI(QMainWindow):
         # Check output directory is specified
         if not self.output_dir_edit.text() or self.output_dir_edit.text().strip() == "":
             errors.append("• Output directory not specified")
-            suggestions.append("Enter an output path (default: ./output)")
+            suggestions.append("Enter an output path (default: ./outputs)")
 
         # Check the analysis window is ordered (end of 0 means "to end of recording")
         start_epoch = self.start_epoch_spin.value()
@@ -8841,7 +8842,7 @@ class InferenceGUI(QMainWindow):
                 edf_path=self.edf_path_edit.text(),
                 checkpoint=self.checkpoint_edit.text(),
                 canon_json=temp_channel_layout_path,
-                output_dir=self.output_dir_edit.text(),
+                output_dir=str(self._output_dir_path()),
                 device=self.device_combo.currentText(),
                 options=self.get_score_options(),
                 cleanup_paths=[temp_channel_layout_path],
@@ -9826,7 +9827,7 @@ class InferenceGUI(QMainWindow):
         }
 
         default_name = f"{base_name}_hypnogram.{format_type}"
-        output_dir = self.output_dir_edit.text() if self.output_dir_edit.text() else "."
+        output_dir = self._output_dir_path()
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
@@ -9874,7 +9875,7 @@ class InferenceGUI(QMainWindow):
             if edf_path.exists()
             else self._get_export_base_name("sleep_stages")
         )
-        output_dir = self.output_dir_edit.text() if self.output_dir_edit.text() else "."
+        output_dir = self._output_dir_path()
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
@@ -9948,7 +9949,7 @@ class InferenceGUI(QMainWindow):
             if edf_path.exists()
             else self._get_export_base_name("sleep_epochs")
         )
-        output_dir = self.output_dir_edit.text() if self.output_dir_edit.text() else "."
+        output_dir = self._output_dir_path()
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
@@ -11417,7 +11418,7 @@ class InferenceGUI(QMainWindow):
         edf_path = Path(self.edf_path_edit.text())
         base_name = edf_path.stem if edf_path.exists() else "sleep_report"
         output_name = self.apply_output_template(base_name, "_report")
-        output_dir = self.output_dir_edit.text() if self.output_dir_edit.text() else "."
+        output_dir = self._output_dir_path()
 
         filename, _ = QFileDialog.getSaveFileName(
             self,

@@ -17,7 +17,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--checkpoint", type=Path, help="Multirate CNN/transformer checkpoint"
     )
-    parser.add_argument("--output", type=Path, default=Path("outputs"))
+    parser.add_argument(
+        "--output",
+        type=lambda value: Path(value).expanduser(),
+        default=Path("outputs"),
+        help="Output directory (default: ./outputs); ~ is expanded",
+    )
     parser.add_argument(
         "--canonical", type=Path, help="Optional JSON list of five channel slots"
     )
