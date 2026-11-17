@@ -51,6 +51,9 @@ has usable signal on all five channels, so the interval `0`–`1034` is the
 whole night. For your own recordings, set the interval to lights-off and
 lights-on; leaving both options out scores the whole file.
 
+Add `--annotations edf` to write EDF+ annotations instead of the per-epoch
+CSV, or `--annotations both` for both files.
+
 A GPU makes scoring faster (about 10 seconds for this night), but the CPU
 (`--device cpu`) also works for a single night.
 
@@ -70,6 +73,8 @@ mean confidence. The output folder contains:
 | `SN007_flags.npz` | Per-epoch uncertainty scores (`flag_maxprob`, `flag_margin`, `flag_entropy`) |
 | `SN007_epoch_signal_valid.npy` | Per-epoch flag for whether usable signal was present |
 | `SN007_preprocessing.json` | Channels used, sampling rate, normalization, and analysis interval |
+| `SN007_epochs_detailed.csv` | Per-epoch annotations: `Epoch` (from 1), elapsed time, stage, confidence, low-confidence flag, and per-stage probabilities. Written by default (`--annotations csv`) |
+| `SN007_annotations.edf` | EDF+ sleep-stage annotations that open alongside `SN007.edf` in EDF viewers. Written with `--annotations edf` or `--annotations both` |
 
 Load them in Python:
 

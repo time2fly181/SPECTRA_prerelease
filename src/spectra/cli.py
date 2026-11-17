@@ -24,6 +24,15 @@ def main(argv: list[str] | None = None) -> None:
         help="Output directory (default: ./outputs); ~ is expanded",
     )
     parser.add_argument(
+        "--annotations",
+        choices=["csv", "edf", "both"],
+        default="csv",
+        help=(
+            "Per-epoch annotation export written with the results: a detailed "
+            "CSV, an EDF+ annotations file, or both (default: csv)"
+        ),
+    )
+    parser.add_argument(
         "--canonical", type=Path, help="Optional JSON list of five channel slots"
     )
     parser.add_argument(
@@ -74,7 +83,10 @@ def main(argv: list[str] | None = None) -> None:
             use_mc_dropout=args.mc_samples > 0,
             mc_samples=max(1, args.mc_samples),
             sequential_loading=True,
+            annotation_format=args.annotations,
         ),
     )
     print(f"Scored {result['score_window']} on a {result['n_epochs']}-epoch recording")
     print(f"Results: {args.output.resolve()}")
+    for path in result["output_paths"].values():
+        print(f"  {Path(path).name}")

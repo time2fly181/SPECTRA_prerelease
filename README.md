@@ -71,10 +71,15 @@ uv run spectra-gui
 ```
 
 1. In **Setup**, choose your EDF recording and model file. Review the channel
-   selections and adjust them if needed.
-2. Start scoring.
+   selections and adjust them if needed. Under **Annotations**, choose which
+   per-epoch annotation file to write: **CSV** (default), **EDF+**, or **Both**
+   (see [Annotation exports](#annotation-exports)).
+2. Start scoring. When scoring finishes, the results and the chosen annotation
+   file are saved to the output directory automatically.
 3. Use **Review** to inspect the hypnogram and waveforms, review uncertain
-   predictions, and make manual corrections. Use **Export** to save your results.
+   predictions, and make manual corrections. The automatic export contains the
+   model's stages only, so after making corrections use **Export** to save an
+   updated CSV or EDF+ file.
 
 ### Command line
 
@@ -83,15 +88,35 @@ uv run spectra \
   --edf /path/to/recording.edf \
   --checkpoint checkpoints/spectra_bp84.ckpt \
   --output outputs/recording \
+  --annotations csv \
   --device auto
 ```
 
 Replace the example paths with your files. `--device auto` selects an available
 GPU or falls back to the CPU; use `--device cpu` to run on the CPU explicitly.
+`--output` defaults to `./outputs`. `--annotations` chooses the per-epoch
+annotation file: `csv` (default), `edf`, or `both`.
 
 Results are saved in the output folder, including a CSV of predicted stages,
-NumPy arrays of stage probabilities, and signal-quality and preprocessing
-information. Epochs without usable signal are marked **Unscored**.
+NumPy arrays of stage probabilities, signal-quality and preprocessing
+information, and the annotation file(s). Epochs without usable signal are marked
+**Unscored**.
+
+### Annotation exports
+
+Every run, from the command line or the desktop application, writes a
+per-epoch annotation file next to the other results. The format is chosen with
+`--annotations` or the **Annotations** setting in Setup:
+
+| Choice | File | Contents |
+| --- | --- | --- |
+| `csv` (default) | `<recording>_epochs_detailed.csv` | One row per 30-second epoch: epoch number (from 1), elapsed time, stage, confidence, a low-confidence flag (confidence below 0.65) with the next most probable stage, and the probability of each stage |
+| `edf` | `<recording>_annotations.edf` | EDF+ annotations file with one `Sleep stage W/N1/N2/N3/R` annotation per run of consecutive epochs, timed from the recording's start time; open it alongside the recording in EDFbrowser or other EDF+ software |
+| `both` | Both files | |
+
+Epochs outside the analysis interval are marked `Unscored` in the CSV and
+left unannotated in the EDF+ file. Existing files with the same name are
+overwritten.
 
 For additional options, including the analysis interval, batch size, and
 uncertainty sampling:

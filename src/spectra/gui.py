@@ -39,6 +39,18 @@ def _running_under_wsl() -> bool:
 
 RUNNING_UNDER_WSL = _running_under_wsl()
 
+# Under WSL the GPU is shared with the Windows desktop through dxgkrnl, and large
+# or back-to-back CUDA batches have coincided with Windows watchdog BSODs.
+WSL_MAX_CUDA_BATCH_SIZE = 8  # Matches the CLI default known to run under WSL.
+WSL_GPU_YIELD_S = 0.01  # Sync + idle after each CUDA batch under WSL.
+WSL_RESERVED_CPU_THREADS = 2  # Left free for the software-rendered UI and host.
+
+
+def _default_batch_size() -> int:
+    """Return the GUI's default batch size for this platform."""
+    return WSL_MAX_CUDA_BATCH_SIZE if RUNNING_UNDER_WSL else 32
+
+
 # Set environment variables BEFORE importing Qt to prevent graphics conflicts.
 # setdefault keeps any value the user exported explicitly.
 os.environ.setdefault("QT_OPENGL", "software")  # Windows: software OpenGL
@@ -2086,92 +2098,28 @@ def create_hypnogram_canvas_class():
             self.fig.savefig(file_path, dpi=dpi, bbox_inches="tight", facecolor="white")
 
         def export_edf_annotations(self, file_path: str, recording_start_time=None):
-            """Export predictions as EDF+ annotations file.
-
-            Creates an EDF+ compatible annotations file that can be loaded in
-            EDFbrowser, Polyman, and other EDF viewers alongside the original recording.
+            """Export predictions as an EDF+ annotations file.
 
             Args:
                 file_path: Output file path (.edf)
-                recording_start_time: datetime object for recording start, or None for midnight
+                recording_start_time: Recording start datetime, or None for
+                    2000-01-01 00:00:00
+
+            Returns:
+                Number of annotations written.
             """
             if self.predictions is None:
                 raise ValueError("No predictions to export")
 
-            try:
-                import pyedflib
-            except ImportError as import_err:
-                raise ImportError(
-                    "pyedflib is required for EDF+ export. Install with: pip install pyedflib"
-                ) from import_err
+            from spectra.inference.exports import write_edf_annotations
 
-            from datetime import datetime
-
-            if recording_start_time is None:
-                recording_start_time = datetime(2000, 1, 1, 0, 0, 0)
-
-            # Stage name mapping for annotations
-            stage_names = {
-                0: "Sleep stage W",
-                1: "Sleep stage N1",
-                2: "Sleep stage N2",
-                3: "Sleep stage N3",
-                4: "Sleep stage R",
-            }
-
-            n_epochs = len(self.predictions)
-
-            # Only annotate epochs inside the analysis window; out-of-window epochs
-            # are left unannotated (i.e. unscored) so the file matches the report.
-            if self.score_window is None:
-                w_start, w_end = 0, n_epochs
-            else:
-                w_start = max(0, min(int(self.score_window[0]), n_epochs))
-                w_end = max(w_start, min(int(self.score_window[1]), n_epochs))
-
-            # Build annotation list: (onset_seconds, duration_seconds, annotation_text)
-            annotations = []
-            if w_end > w_start:
-                current_stage = self.predictions[w_start]
-                segment_start = w_start
-
-                for i in range(w_start + 1, w_end):
-                    if self.predictions[i] != current_stage:
-                        # End of segment
-                        onset = segment_start * self.epoch_sec
-                        duration = (i - segment_start) * self.epoch_sec
-                        annotations.append(
-                            (
-                                onset,
-                                duration,
-                                stage_names.get(current_stage, "Unscored"),
-                            )
-                        )
-                        current_stage = self.predictions[i]
-                        segment_start = i
-
-                # Add final segment
-                onset = segment_start * self.epoch_sec
-                duration = (w_end - segment_start) * self.epoch_sec
-                annotations.append(
-                    (onset, duration, stage_names.get(current_stage, "Unscored"))
-                )
-
-            # Create EDF+ annotations file
-            with pyedflib.EdfWriter(
-                file_path, 0, file_type=pyedflib.FILETYPE_EDFPLUS
-            ) as f:
-                f.setStartdatetime(recording_start_time)
-                f.setPatientName("Anonymous")
-                f.setPatientCode("")
-                f.setTechnician("SPECTRA")
-                f.setRecordingAdditional("Sleep_staging_annotations")
-
-                # Write annotations
-                for onset, duration, text in annotations:
-                    f.writeAnnotation(onset, duration, text)
-
-            return len(annotations)
+            return write_edf_annotations(
+                file_path,
+                np.asarray(self.predictions),
+                epoch_sec=self.epoch_sec,
+                score_window=self.score_window,
+                start_time=recording_start_time,
+            )
 
         def export_epoch_csv(
             self,
@@ -2182,124 +2130,33 @@ def create_hypnogram_canvas_class():
         ):
             """Export detailed epoch-by-epoch results to CSV.
 
-            Includes epoch number, time, stage, confidence, low-confidence flag,
-            strongest alternate stage for flagged epochs, and per-class probabilities.
-
             Args:
                 file_path: Output file path (.csv)
                 threshold: Low-confidence threshold override
+                model_predictions: Model stages before manual overrides
+                manual_overrides: Epoch index -> overridden stage index
+
+            Returns:
+                Number of epochs written.
             """
             if self.predictions is None:
                 raise ValueError("No predictions to export")
 
-            import csv
+            from spectra.inference.exports import write_epoch_csv
 
-            active_threshold = (
-                self.confidence_threshold if threshold is None else float(threshold)
-            )
-            base_predictions = (
-                np.asarray(model_predictions, dtype=np.int64)
-                if model_predictions is not None
-                and len(model_predictions) == len(self.predictions)
-                else np.asarray(self.predictions, dtype=np.int64)
-            )
-            records = _build_epoch_confidence_records(
-                base_predictions,
-                final_predictions=self.predictions,
-                manual_overrides=manual_overrides,
-                epoch_sec=self.epoch_sec,
-                probabilities=self.probabilities,
+            return write_epoch_csv(
+                file_path,
+                np.asarray(self.predictions),
+                self.probabilities,
                 confidences=self.confidence,
-                threshold=active_threshold,
+                epoch_sec=self.epoch_sec,
+                score_window=self.score_window,
+                model_predictions=model_predictions,
+                manual_overrides=manual_overrides,
+                threshold=(
+                    self.confidence_threshold if threshold is None else float(threshold)
+                ),
             )
-
-            # Out-of-window epochs are reported as Unscored (final stage only; the
-            # raw model stage is preserved in the ModelStage columns).
-            n_epochs = len(self.predictions)
-            if self.score_window is None:
-                w_start, w_end = 0, n_epochs
-            else:
-                w_start = max(0, min(int(self.score_window[0]), n_epochs))
-                w_end = max(w_start, min(int(self.score_window[1]), n_epochs))
-
-            with open(file_path, "w", newline="") as f:
-                writer = csv.writer(f)
-
-                # Header
-                header = [
-                    "Epoch",
-                    "Time_sec",
-                    "Time_hms",
-                    "Stage",
-                    "Stage_numeric",
-                    "ModelStage",
-                    "ModelStageNumeric",
-                    "FinalStage",
-                    "FinalStageNumeric",
-                    "ManualOverride",
-                ]
-                if records and records[0]["confidence"] is not None:
-                    header.extend(
-                        [
-                            "Confidence",
-                            "LowConfidenceFlag",
-                            "NextMostProbableStage",
-                            "NextMostProbableProbability",
-                        ]
-                    )
-                if records and records[0]["probabilities"] is not None:
-                    header.extend(["P_Wake", "P_N1", "P_N2", "P_N3", "P_REM"])
-                writer.writerow(header)
-
-                # Data
-                for record in records:
-                    in_window = w_start <= int(record["epoch_index"]) < w_end
-                    final_stage = record["final_stage"] if in_window else "Unscored"
-                    final_stage_numeric = (
-                        record["final_stage_numeric"] if in_window else -1
-                    )
-                    row = [
-                        record["epoch"],
-                        record["time_sec"],
-                        record["time_hms"],
-                        final_stage,
-                        final_stage_numeric,
-                        record["model_stage"],
-                        record["model_stage_numeric"],
-                        final_stage,
-                        final_stage_numeric,
-                        "Yes" if record["manual_override"] else "No",
-                    ]
-
-                    confidence = record["confidence"]
-                    if confidence is not None:
-                        row.extend(
-                            [
-                                f"{float(confidence):.4f}",
-                                "Yes" if record["low_confidence"] else "No",
-                                (
-                                    str(record["next_stage"])
-                                    if record["low_confidence"]
-                                    and record["next_stage"] is not None
-                                    else ""
-                                ),
-                                (
-                                    f"{float(record['next_stage_probability']):.4f}"
-                                    if record["low_confidence"]
-                                    and record["next_stage_probability"] is not None
-                                    else ""
-                                ),
-                            ]
-                        )
-
-                    probabilities = record["probabilities"]
-                    if probabilities is not None:
-                        for p in probabilities:
-                            row.append(f"{p:.4f}")
-
-                    writer.writerow(row)
-
-            return len(self.predictions)
 
         def get_low_confidence_epochs(self, threshold=None):
             """Get list of epochs with confidence below threshold.
@@ -6933,7 +6790,6 @@ class InferenceGUI(QMainWindow):
             "recent_projects": [],
         }
 
-        self._batch_size_from_settings = False
         self.initUI()
         self.apply_stylesheet()
         self.load_settings()
@@ -7788,9 +7644,24 @@ class InferenceGUI(QMainWindow):
         self.output_dir_status_label.setVisible(False)
         layout.addWidget(self.output_dir_status_label, 5, 1, 1, 2)
 
+        # Per-epoch annotation export written automatically after each run
+        layout.addWidget(QLabel("Annotations:"), 6, 0)
+        self.annotation_format_combo = QComboBox()
+        for label, value in (("CSV", "csv"), ("EDF+", "edf"), ("Both", "both")):
+            self.annotation_format_combo.addItem(label, value)
+        self.annotation_format_combo.setToolTip(
+            "Per-epoch annotations written to the output directory after scoring:\n"
+            "CSV  -> <recording>_epochs_detailed.csv (stage, time, confidence,\n"
+            "        probabilities per epoch)\n"
+            "EDF+ -> <recording>_annotations.edf (sleep-stage annotations that\n"
+            "        open alongside the recording in EDF viewers)\n"
+            "Both -> both files"
+        )
+        layout.addWidget(self.annotation_format_combo, 6, 1, 1, 2)
+
         # Device selection
         self.device_label = QLabel("Device:")
-        layout.addWidget(self.device_label, 6, 0)
+        layout.addWidget(self.device_label, 7, 0)
         self.device_combo = QComboBox()
         self.device_combo.addItems(["auto", "cuda", "mps", "cpu"])
         self.device_combo.setToolTip(
@@ -7801,7 +7672,7 @@ class InferenceGUI(QMainWindow):
         self.device_combo.currentTextChanged.connect(
             lambda _text: self._update_status_bar()
         )
-        layout.addWidget(self.device_combo, 6, 1, 1, 2)
+        layout.addWidget(self.device_combo, 7, 1, 1, 2)
 
         # Batch processing section
         batch_frame = QFrame()
@@ -7854,7 +7725,7 @@ class InferenceGUI(QMainWindow):
         self.clear_batch_button.setEnabled(False)
         batch_layout.addWidget(self.clear_batch_button)
 
-        layout.addWidget(batch_frame, 7, 0, 1, 3)
+        layout.addWidget(batch_frame, 8, 0, 1, 3)
 
         for edit in (self.edf_path_edit, self.checkpoint_edit, self.output_dir_edit):
             edit.textChanged.connect(self._update_setup_readiness)
@@ -8018,7 +7889,7 @@ class InferenceGUI(QMainWindow):
         layout.addWidget(QLabel("Batch Size:"), 1, 0)
         self.batch_size_spin = QSpinBox()
         self.batch_size_spin.setRange(1, 256)
-        self.batch_size_spin.setValue(32)
+        self.batch_size_spin.setValue(_default_batch_size())
         self.batch_size_spin.setToolTip(
             "How many epochs the GPU processes in parallel. Larger = faster but uses "
             "more VRAM. Typical: 32 on a 16 GB GPU, 16 on 8 GB, 8 on 6 GB. Halve this "
@@ -8065,31 +7936,60 @@ class InferenceGUI(QMainWindow):
         self._qt_log_handler = handler
 
     def _apply_wsl_safe_defaults(self) -> None:
-        """Use the CLI's batch size under WSL, where the GPU also drives WSLg.
+        """Clamp batch size and torch CPU threads under WSL.
 
-        Large GUI batches under WSL have coincided with display-driver
-        watchdog crashes; batch 8 matches the CLI default known to run there.
-        A batch size saved by the user is kept, with a warning.
+        Large GUI batches under WSL have coincided with Windows watchdog
+        BSODs; batch 8 matches the CLI default known to run there. Saved
+        settings and project files are clamped too, and
+        ``_enforce_wsl_cuda_batch_cap`` re-checks at run start.
         """
         if not RUNNING_UNDER_WSL:
             return
-        wsl_batch_size = 8
         current = self.batch_size_spin.value()
-        if not self._batch_size_from_settings:
-            if current > wsl_batch_size:
-                self.batch_size_spin.setValue(wsl_batch_size)
+        if current > WSL_MAX_CUDA_BATCH_SIZE:
+            self.batch_size_spin.setValue(WSL_MAX_CUDA_BATCH_SIZE)
+            self.log(
+                f"WSL detected: batch size lowered from {current} to "
+                f"{WSL_MAX_CUDA_BATCH_SIZE} (matches the CLI) to reduce GPU "
+                "watchdog risk.",
+                logging.INFO,
+            )
+
+        # An explicit OMP_NUM_THREADS from the user wins over this budget.
+        if "OMP_NUM_THREADS" not in os.environ:
+            try:
+                import torch
+
+                # torch defaults to physical cores, which can be below the
+                # logical-CPU budget; never raise the thread count.
+                budget = max(
+                    1,
+                    min(
+                        torch.get_num_threads(),
+                        (os.cpu_count() or 2) - WSL_RESERVED_CPU_THREADS,
+                    ),
+                )
+                torch.set_num_threads(budget)
                 self.log(
-                    f"WSL detected: default batch size lowered to {wsl_batch_size} "
-                    "(matches the CLI) to reduce GPU watchdog risk.",
+                    f"WSL detected: PyTorch CPU threads limited to {budget}.",
                     logging.INFO,
                 )
-        elif current > wsl_batch_size:
-            self.log(
-                f"WSL detected: saved batch size {current} is above "
-                f"{wsl_batch_size}. If the system becomes unstable during "
-                f"inference, use batch size {wsl_batch_size} or less.",
-                logging.WARNING,
-            )
+            except Exception as exc:
+                self.log(f"Could not limit PyTorch CPU threads: {exc}", logging.WARNING)
+
+    def _enforce_wsl_cuda_batch_cap(self, device_info: Any) -> None:
+        """Cap the batch size for CUDA runs under WSL, whatever set it."""
+        if not RUNNING_UNDER_WSL or device_info.resolved != "cuda":
+            return
+        current = self.batch_size_spin.value()
+        if current <= WSL_MAX_CUDA_BATCH_SIZE:
+            return
+        self.batch_size_spin.setValue(WSL_MAX_CUDA_BATCH_SIZE)
+        self.log(
+            f"WSL + CUDA: batch size capped at {WSL_MAX_CUDA_BATCH_SIZE} "
+            f"(was {current}) to avoid GPU watchdog crashes.",
+            logging.WARNING,
+        )
 
     def apply_memory_preset(self, preset_name: str):
         """Apply memory optimization preset.
@@ -8320,6 +8220,11 @@ class InferenceGUI(QMainWindow):
             """)
             return
         self._load_checkpoint_info(path)
+
+    def _set_annotation_format(self, value: object) -> None:
+        """Select an annotation export format, falling back to CSV."""
+        index = self.annotation_format_combo.findData(value)
+        self.annotation_format_combo.setCurrentIndex(max(index, 0))
 
     def _output_dir_path(self) -> Path:
         """Return the configured output directory with ``~`` expanded."""
@@ -8768,8 +8673,11 @@ class InferenceGUI(QMainWindow):
             # Inference
             amp_mode=self.amp_mode_combo.currentText(),
             batch_size=self.batch_size_spin.value(),
+            inter_batch_yield_s=WSL_GPU_YIELD_S if RUNNING_UNDER_WSL else 0.0,
             # Per-recording normalization is fixed; MC dropout is not used here.
             use_mc_dropout=False,
+            # Output: per-epoch annotation export written after scoring.
+            annotation_format=self.annotation_format_combo.currentData() or "csv",
         )
 
     def start_inference(self):
@@ -8816,6 +8724,7 @@ class InferenceGUI(QMainWindow):
         device_info = self._resolve_selected_device()
         if device_info.warning:
             self.log(device_info.warning, logging.WARNING)
+        self._enforce_wsl_cuda_batch_cap(device_info)
         self._clear_selected_device_cache(
             success_message=f"Prepared {device_info.description} for inference",
             warning_prefix="Could not clear accelerator cache before inference",
@@ -9198,12 +9107,19 @@ class InferenceGUI(QMainWindow):
         )
 
         # Show success dialog
+        results_dir = Path(output_paths["predictions_csv"]).parent
+        annotation_files = "".join(
+            f"  {Path(output_paths[key]).name}\n"
+            for key in ("epochs_csv", "annotations_edf")
+            if key in output_paths
+        )
         QMessageBox.information(
             self,
             "Inference Complete",
             f"Inference completed successfully!\n\n"
             f"Scored {n_epochs} epochs.\n"
-            f"Results saved to: {result['output_paths']['predictions_csv']}\n\n"
+            f"Results saved to: {results_dir}\n"
+            f"Annotations:\n{annotation_files}\n"
             "Review the hypnogram in the 'Hypnogram' tab and flagged epochs in the "
             "'Confidence Review' or 'Signal Review' tab.",
         )
@@ -9888,20 +9804,11 @@ class InferenceGUI(QMainWindow):
             return
 
         try:
-            # Try to get recording start time from original EDF
-            recording_start = None
-            try:
-                import mne
+            from spectra.inference.exports import recording_start_time
 
-                raw = mne.io.read_raw_edf(str(edf_path), preload=False, verbose=False)
-                recording_start = raw.info.get("meas_date")
-                if recording_start is not None:
-                    # Convert to datetime if needed
-                    if hasattr(recording_start, "replace"):
-                        recording_start = recording_start.replace(tzinfo=None)
-            except Exception:
-                pass  # Use None if we can't get the recording start time
-
+            recording_start = (
+                recording_start_time(edf_path) if edf_path.is_file() else None
+            )
             self.hypnogram_canvas.export_edf_annotations(filename, recording_start)
             self.log(f"EDF+ annotations exported to: {filename}", logging.INFO)
 
@@ -10304,6 +10211,7 @@ class InferenceGUI(QMainWindow):
                 self.checkpoint_edit.setText(settings["checkpoint"])
             if "output_dir" in settings:
                 self.output_dir_edit.setText(settings["output_dir"])
+            self._set_annotation_format(settings.get("annotation_format"))
             if isinstance(settings.get("channel_slot_overrides"), dict):
                 normalized_overrides, _ = _normalize_channel_slot_overrides(
                     settings["channel_slot_overrides"]
@@ -10362,7 +10270,6 @@ class InferenceGUI(QMainWindow):
                     <= self.batch_size_spin.maximum()
                 ):
                     self.batch_size_spin.setValue(int(val))
-                    self._batch_size_from_settings = True
             if "amp_mode" in settings:
                 idx = self.amp_mode_combo.findText(settings["amp_mode"])
                 if idx >= 0:
@@ -10427,6 +10334,7 @@ class InferenceGUI(QMainWindow):
                 "edf_path": self.edf_path_edit.text(),
                 "checkpoint": self.checkpoint_edit.text(),
                 "output_dir": self.output_dir_edit.text(),
+                "annotation_format": self.annotation_format_combo.currentData(),
                 "channel_slot_overrides": self._channel_slot_overrides,
                 "device": self.device_combo.currentText(),
                 # Recent files
@@ -10618,6 +10526,7 @@ class InferenceGUI(QMainWindow):
         self.edf_path_edit.clear()
         self.checkpoint_edit.clear()
         self.output_dir_edit.clear()
+        self._set_annotation_format(None)
         self._available_edf_channel_labels = []
         self._channel_slot_overrides = _default_channel_slot_overrides()
         self._sync_channel_slot_comboboxes()
@@ -10634,7 +10543,7 @@ class InferenceGUI(QMainWindow):
         )
 
         # Reset to defaults
-        self.batch_size_spin.setValue(32)
+        self.batch_size_spin.setValue(_default_batch_size())
         self.epoch_sec_spin.setValue(30)
 
         self.project_state.reset()
@@ -10692,6 +10601,7 @@ class InferenceGUI(QMainWindow):
                 self.checkpoint_edit.setText(project["checkpoint"])
             if "output_dir" in project:
                 self.output_dir_edit.setText(project["output_dir"])
+            self._set_annotation_format(project.get("annotation_format"))
             if isinstance(project.get("channel_slot_overrides"), dict):
                 normalized_overrides, _ = _normalize_channel_slot_overrides(
                     project["channel_slot_overrides"]
@@ -10807,6 +10717,7 @@ class InferenceGUI(QMainWindow):
                 "edf_path": self.edf_path_edit.text(),
                 "checkpoint": self.checkpoint_edit.text(),
                 "output_dir": self.output_dir_edit.text(),
+                "annotation_format": self.annotation_format_combo.currentData(),
                 "channel_slot_overrides": self._channel_slot_overrides,
                 "manual_score_overrides": {
                     str(epoch_idx): int(stage_idx)
@@ -12039,7 +11950,7 @@ class InferenceGUI(QMainWindow):
             self._high_contrast_action.setChecked(False)
 
             # Reset spinbox/checkbox values to defaults
-            self.batch_size_spin.setValue(32)
+            self.batch_size_spin.setValue(_default_batch_size())
             self.epoch_sec_spin.setValue(30)
             self.amp_mode_combo.setCurrentText("fp32")
             self._channel_slot_overrides = _default_channel_slot_overrides()

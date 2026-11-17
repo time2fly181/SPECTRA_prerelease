@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ import torch
 import torch.nn as nn
 from scipy.signal import resample_poly
 
+from spectra.inference.exports import ANNOTATION_FORMATS, export_annotations
 from spectra.utils.device_utils import clear_device_cache, resolve_device
 
 if TYPE_CHECKING:
@@ -54,6 +56,18 @@ def _resolve_inference_device(
 
     resolved = resolve_device(preference)
     return resolved.torch_device, resolved.warning, resolved.description
+
+
+def _yield_gpu_between_batches(options: ScoreOptions, device: torch.device) -> None:
+    """Drain the CUDA queue and idle briefly so the host GPU scheduler can breathe.
+
+    Under WSL the GPU is shared with the Windows desktop through dxgkrnl, and
+    sustained back-to-back compute has coincided with display-driver watchdog
+    crashes. A short synchronize-and-sleep between batches bounds queued work.
+    """
+    if options.inter_batch_yield_s > 0 and device.type == "cuda":
+        torch.cuda.synchronize(device)
+        time.sleep(options.inter_batch_yield_s)
 
 
 def _should_use_cuda_prefetch(
@@ -241,6 +255,9 @@ class ScoreOptions:
     batch_size: int = 32
     sequential_loading: bool = True  # Materialize one context batch at a time.
     cuda_prefetch: bool = True  # CUDA-only: overlap CPU→GPU transfer with computation
+    # CUDA-only: synchronize and sleep this many seconds after each batch.
+    # The GUI sets it under WSL to relieve the Windows GPU watchdog; 0 disables.
+    inter_batch_yield_s: float = 0.0
 
     # Compatibility fields; external EDF normalization is always applied.
     calibration_mode: str = "per_recording"
@@ -273,6 +290,11 @@ class ScoreOptions:
     # prefer_averaged keyword, not this field; see load_model_from_checkpoint.
     prefer_averaged: bool = False
 
+    # Output: per-epoch annotation export written next to the prediction files.
+    # "csv" -> <stem>_epochs_detailed.csv, "edf" -> <stem>_annotations.edf
+    # (EDF+ sleep-stage annotations), "both" -> both files.
+    annotation_format: str = "csv"
+
     @property
     def fs(self) -> int:
         """Fixed EDF/model sampling rate; not configurable."""
@@ -292,6 +314,16 @@ class ScoreOptions:
             )
         if self.mc_aggregation not in {"consistent", "legacy"}:
             raise ValueError("mc_aggregation must be 'consistent' or 'legacy'")
+        if self.inter_batch_yield_s < 0:
+            raise ValueError(
+                "inter_batch_yield_s must be nonnegative, "
+                f"got {self.inter_batch_yield_s!r}"
+            )
+        if self.annotation_format not in ANNOTATION_FORMATS:
+            raise ValueError(
+                f"annotation_format must be one of {ANNOTATION_FORMATS}, "
+                f"got {self.annotation_format!r}"
+            )
 
         mc_pooling = str(self.mc_pooling or "prob").strip().lower()
         if mc_pooling not in {"prob", "logit"}:
@@ -2352,6 +2384,7 @@ def run_inference(
                 accumulator.add(
                     batch_out, moments, start_idx, end_idx, batch_mask, center_valid_t
                 )
+                _yield_gpu_between_batches(options, device)
 
         return accumulator.finish(diagnostics_out)
 
@@ -2505,6 +2538,7 @@ def run_inference_sequential(
                     batch_presence_mask,
                     center_valid_t,
                 )
+                _yield_gpu_between_batches(options, device)
                 batch_idx += 1
 
         return accumulator.finish(diagnostics_out)
@@ -3096,6 +3130,19 @@ def score_recording(
         provenance_path.write_text(json.dumps(provenance, indent=2) + "\n")
         output_paths["epoch_signal_valid"] = str(validity_path)
         output_paths["preprocessing"] = str(provenance_path)
+        output_paths.update(
+            export_annotations(
+                options.annotation_format,
+                output_dir,
+                edf_basename,
+                edf_path=edf_path,
+                predictions=predictions,
+                probabilities=probabilities,
+                confidences=confidences,
+                score_window=(analysis_start, analysis_end),
+                epoch_sec=options.epoch_sec,
+            )
+        )
 
         report_progress("Complete", 100)
 
